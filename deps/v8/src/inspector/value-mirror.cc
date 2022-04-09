@@ -152,7 +152,7 @@ Response toProtocolValue(v8::Local<v8::Context> context,
                          v8::Local<v8::Value> value,
                          std::unique_ptr<protocol::Value>* result) {
   if (value->IsUndefined()) return Response::Success();
-#if defined(V8_USE_ADDRESS_SANITIZER) && V8_OS_MACOSX
+#if defined(V8_USE_ADDRESS_SANITIZER) && V8_OS_DARWIN
   // For whatever reason, ASan on MacOS has bigger stack frames.
   static const int kMaxDepth = 900;
 #else
@@ -209,10 +209,9 @@ String16 descriptionForSymbol(v8::Local<v8::Context> context,
 String16 descriptionForBigInt(v8::Local<v8::Context> context,
                               v8::Local<v8::BigInt> value) {
   v8::Isolate* isolate = context->GetIsolate();
-  v8::TryCatch tryCatch(isolate);
-  v8::Local<v8::String> description;
-  if (!value->ToString(context).ToLocal(&description)) return String16();
-  return toProtocolString(isolate, description) + "n";
+  v8::Local<v8::String> description =
+      v8::debug::GetBigIntDescription(isolate, value);
+  return toProtocolString(isolate, description);
 }
 
 String16 descriptionForPrimitiveType(v8::Local<v8::Context> context,
@@ -309,11 +308,7 @@ String16 descriptionForObject(v8::Isolate* isolate,
 String16 descriptionForDate(v8::Local<v8::Context> context,
                             v8::Local<v8::Date> date) {
   v8::Isolate* isolate = context->GetIsolate();
-  v8::TryCatch tryCatch(isolate);
-  v8::Local<v8::String> description;
-  if (!date->ToString(context).ToLocal(&description)) {
-    return descriptionForObject(isolate, date);
-  }
+  v8::Local<v8::String> description = v8::debug::GetDateDescription(date);
   return toProtocolString(isolate, description);
 }
 
@@ -520,7 +515,7 @@ class BigIntMirror final : public ValueMirror {
     *result = RemoteObject::create()
                   .setType(RemoteObject::TypeEnum::Bigint)
                   .setUnserializableValue(description)
-                  .setDescription(description)
+                  .setDescription(abbreviateString(description, kMiddle))
                   .build();
     return Response::Success();
   }
@@ -544,7 +539,8 @@ class BigIntMirror final : public ValueMirror {
     *preview =
         ObjectPreview::create()
             .setType(RemoteObject::TypeEnum::Bigint)
-            .setDescription(descriptionForBigInt(context, m_value))
+            .setDescription(abbreviateString(
+                descriptionForBigInt(context, m_value), kMiddle))
             .setOverflow(false)
             .setProperties(std::make_unique<protocol::Array<PropertyPreview>>())
             .build();
@@ -893,7 +889,8 @@ void getPrivatePropertiesForPreview(
     int* nameLimit, bool* overflow,
     protocol::Array<PropertyPreview>* privateProperties) {
   std::vector<PrivatePropertyMirror> mirrors =
-      ValueMirror::getPrivateProperties(context, object);
+      ValueMirror::getPrivateProperties(context, object,
+                                        /* accessPropertiesOnly */ false);
   for (auto& mirror : mirrors) {
     std::unique_ptr<PropertyPreview> propertyPreview;
     if (mirror.value) {
@@ -1429,7 +1426,8 @@ void ValueMirror::getInternalProperties(
 
 // static
 std::vector<PrivatePropertyMirror> ValueMirror::getPrivateProperties(
-    v8::Local<v8::Context> context, v8::Local<v8::Object> object) {
+    v8::Local<v8::Context> context, v8::Local<v8::Object> object,
+    bool accessorPropertiesOnly) {
   std::vector<PrivatePropertyMirror> mirrors;
   v8::Isolate* isolate = context->GetIsolate();
   v8::MicrotasksScope microtasksScope(isolate,
@@ -1462,6 +1460,8 @@ std::vector<PrivatePropertyMirror> ValueMirror::getPrivateProperties(
       if (!setter->IsNull()) {
         setterMirror = ValueMirror::create(context, setter);
       }
+    } else if (accessorPropertiesOnly) {
+      continue;
     } else {
       valueMirror = ValueMirror::create(context, value);
     }

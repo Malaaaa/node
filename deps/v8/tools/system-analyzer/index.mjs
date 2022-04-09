@@ -15,9 +15,8 @@ import {MapLogEntry} from './log/map.mjs';
 import {TickLogEntry} from './log/tick.mjs';
 import {TimerLogEntry} from './log/timer.mjs';
 import {Processor} from './processor.mjs';
-import {Timeline} from './timeline.mjs'
 import {FocusEvent, SelectionEvent, SelectRelatedEvent, SelectTimeEvent, ToolTipEvent,} from './view/events.mjs';
-import {$, CSSColor, groupBy} from './view/helper.mjs';
+import {$, groupBy} from './view/helper.mjs';
 
 class App {
   _state;
@@ -51,11 +50,11 @@ class App {
       toolTip: $('#tool-tip'),
     };
     this._view.logFileReader.addEventListener(
-        'fileuploadstart', (e) => this.handleFileUploadStart(e));
+        'fileuploadstart', this.handleFileUploadStart.bind(this));
     this._view.logFileReader.addEventListener(
-        'fileuploadchunk', (e) => this.handleFileUploadChunk(e));
+        'fileuploadchunk', this.handleFileUploadChunk.bind(this));
     this._view.logFileReader.addEventListener(
-        'fileuploadend', (e) => this.handleFileUploadEnd(e));
+        'fileuploadend', this.handleFileUploadEnd.bind(this));
     this._startupPromise = this._loadCustomElements();
     this._view.codeTrack.svg = true;
   }
@@ -91,14 +90,14 @@ class App {
     document.addEventListener(
         'keydown', e => this._navigation?.handleKeyDown(e));
     document.addEventListener(
-        SelectRelatedEvent.name, e => this.handleSelectRelatedEntries(e));
+        SelectRelatedEvent.name, this.handleSelectRelatedEntries.bind(this));
     document.addEventListener(
-        SelectionEvent.name, e => this.handleSelectEntries(e))
+        SelectionEvent.name, this.handleSelectEntries.bind(this))
     document.addEventListener(
-        FocusEvent.name, e => this.handleFocusLogEntryl(e));
+        FocusEvent.name, this.handleFocusLogEntry.bind(this));
     document.addEventListener(
-        SelectTimeEvent.name, e => this.handleTimeRangeSelect(e));
-    document.addEventListener(ToolTipEvent.name, e => this.handleToolTip(e));
+        SelectTimeEvent.name, this.handleTimeRangeSelect.bind(this));
+    document.addEventListener(ToolTipEvent.name, this.handleToolTip.bind(this));
   }
 
   handleSelectRelatedEntries(e) {
@@ -151,7 +150,7 @@ class App {
 
   handleSelectEntries(e) {
     e.stopImmediatePropagation();
-    this.showEntries(e.entries);
+    this.selectEntries(e.entries);
   }
 
   selectEntries(entries) {
@@ -160,29 +159,30 @@ class App {
       this.selectEntriesOfSingleType(group.entries);
       missingTypes.delete(group.key);
     });
-    missingTypes.forEach(type => this.selectEntriesOfSingleType([], type));
+    missingTypes.forEach(
+        type => this.selectEntriesOfSingleType([], type, false));
   }
 
-  selectEntriesOfSingleType(entries, type) {
+  selectEntriesOfSingleType(entries, type, focusView = true) {
     const entryType = entries[0]?.constructor ?? type;
     switch (entryType) {
       case Script:
         entries = entries.flatMap(script => script.sourcePositions);
-        return this.showSourcePositions(entries);
+        return this.showSourcePositions(entries, focusView);
       case SourcePosition:
-        return this.showSourcePositions(entries);
+        return this.showSourcePositions(entries, focusView);
       case MapLogEntry:
-        return this.showMapEntries(entries);
+        return this.showMapEntries(entries, focusView);
       case IcLogEntry:
-        return this.showIcEntries(entries);
+        return this.showIcEntries(entries, focusView);
       case ApiLogEntry:
-        return this.showApiEntries(entries);
+        return this.showApiEntries(entries, focusView);
       case CodeLogEntry:
-        return this.showCodeEntries(entries);
+        return this.showCodeEntries(entries, focusView);
       case DeoptLogEntry:
-        return this.showDeoptEntries(entries);
+        return this.showDeoptEntries(entries, focusView);
       case SharedLibLogEntry:
-        return this.showSharedLibEntries(entries);
+        return this.showSharedLibEntries(entries, focusView);
       case TimerLogEntry:
       case TickLogEntry:
         break;
@@ -230,10 +230,10 @@ class App {
 
   handleTimeRangeSelect(e) {
     e.stopImmediatePropagation();
-    this.selectTimeRange(e.start, e.end);
+    this.selectTimeRange(e.start, e.end, e.focus, e.zoom);
   }
 
-  selectTimeRange(start, end) {
+  selectTimeRange(start, end, focus = false, zoom = false) {
     this._state.selectTimeRange(start, end);
     this.showMapEntries(this._state.mapTimeline.selectionOrSelf, false);
     this.showIcEntries(this._state.icTimeline.selectionOrSelf, false);
@@ -242,10 +242,10 @@ class App {
     this.showApiEntries(this._state.apiTimeline.selectionOrSelf, false);
     this.showTickEntries(this._state.tickTimeline.selectionOrSelf, false);
     this.showTimerEntries(this._state.timerTimeline.selectionOrSelf, false);
-    this._view.timelinePanel.timeSelection = {start, end};
+    this._view.timelinePanel.timeSelection = {start, end, focus, zoom};
   }
 
-  handleFocusLogEntryl(e) {
+  handleFocusLogEntry(e) {
     e.stopImmediatePropagation();
     this.focusLogEntry(e.entry);
   }
@@ -281,11 +281,11 @@ class App {
     this._state.map = entry;
     this._view.mapTrack.focusedEntry = entry;
     this._view.mapPanel.map = entry;
-    this._view.mapPanel.show();
     if (focusSourcePosition) {
       this.focusCodeLogEntry(entry.code, false);
       this.focusSourcePosition(entry.sourcePosition);
     }
+    this._view.mapPanel.show();
   }
 
   focusIcLogEntry(entry) {
@@ -361,6 +361,8 @@ class App {
     this.restartApp();
     $('#container').className = 'initial';
     this._processor = new Processor();
+    this._processor.setProgressCallback(
+        e.detail.totalSize, e.detail.progressCallback);
   }
 
   async handleFileUploadChunk(e) {
@@ -420,115 +422,53 @@ class Navigation {
     this.state = state;
     this._view = view;
   }
+
   get map() {
     return this.state.map
   }
+
   set map(value) {
     this.state.map = value
   }
+
   get chunks() {
     return this.state.mapTimeline.chunks;
   }
+
   increaseTimelineResolution() {
     this._view.timelinePanel.nofChunks *= 1.5;
     this.state.nofChunks *= 1.5;
   }
+
   decreaseTimelineResolution() {
     this._view.timelinePanel.nofChunks /= 1.5;
     this.state.nofChunks /= 1.5;
   }
-  selectNextEdge() {
-    if (!this.map) return;
-    if (this.map.children.length != 1) return;
-    this.map = this.map.children[0].to;
-    this._view.mapTrack.selectedEntry = this.map;
-    this.updateUrl();
-    this._view.mapPanel.map = this.map;
-  }
-  selectPrevEdge() {
-    if (!this.map) return;
-    if (!this.map.parent) return;
-    this.map = this.map.parent;
-    this._view.mapTrack.selectedEntry = this.map;
-    this.updateUrl();
-    this._view.mapPanel.map = this.map;
-  }
-  selectDefaultMap() {
-    this.map = this.chunks[0].at(0);
-    this._view.mapTrack.selectedEntry = this.map;
-    this.updateUrl();
-    this._view.mapPanel.map = this.map;
-  }
-  moveInChunks(next) {
-    if (!this.map) return this.selectDefaultMap();
-    let chunkIndex = this.map.chunkIndex(this.chunks);
-    let chunk = this.chunks[chunkIndex];
-    let index = chunk.indexOf(this.map);
-    if (next) {
-      chunk = chunk.next(this.chunks);
-    } else {
-      chunk = chunk.prev(this.chunks);
-    }
-    if (!chunk) return;
-    index = Math.min(index, chunk.size() - 1);
-    this.map = chunk.at(index);
-    this._view.mapTrack.selectedEntry = this.map;
-    this.updateUrl();
-    this._view.mapPanel.map = this.map;
-  }
-  moveInChunk(delta) {
-    if (!this.map) return this.selectDefaultMap();
-    let chunkIndex = this.map.chunkIndex(this.chunks)
-    let chunk = this.chunks[chunkIndex];
-    let index = chunk.indexOf(this.map) + delta;
-    let map;
-    if (index < 0) {
-      map = chunk.prev(this.chunks).last();
-    } else if (index >= chunk.size()) {
-      map = chunk.next(this.chunks).first()
-    } else {
-      map = chunk.at(index);
-    }
-    this.map = map;
-    this._view.mapTrack.selectedEntry = this.map;
-    this.updateUrl();
-    this._view.mapPanel.map = this.map;
-  }
+
   updateUrl() {
     let entries = this.state.entries;
     let params = new URLSearchParams(entries);
     window.history.pushState(entries, '', '?' + params.toString());
   }
+
+  scrollLeft() {}
+
+  scrollRight() {}
+
   handleKeyDown(event) {
     switch (event.key) {
-      case 'ArrowUp':
-        event.preventDefault();
-        if (event.shiftKey) {
-          this.selectPrevEdge();
-        } else {
-          this.moveInChunk(-1);
-        }
+      case 'd':
+        this.scrollLeft();
         return false;
-      case 'ArrowDown':
-        event.preventDefault();
-        if (event.shiftKey) {
-          this.selectNextEdge();
-        } else {
-          this.moveInChunk(1);
-        }
+      case 'a':
+        this.scrollRight();
         return false;
-      case 'ArrowLeft':
-        this.moveInChunks(false);
-        break;
-      case 'ArrowRight':
-        this.moveInChunks(true);
-        break;
       case '+':
         this.increaseTimelineResolution();
-        break;
+        return false;
       case '-':
         this.decreaseTimelineResolution();
-        break;
+        return false;
     }
   }
 }
